@@ -142,7 +142,23 @@ type: iframe
 url: /local/tesvor-map/map.html
 aspect_ratio: 100%
 ```
+---
 
+## Screenshots
+
+### Reverse engineering environment
+
+![Reverse Engineering Setup](docs/images/re-tesvor-4.png)
+
+### vertical-stack-card tesvor
+
+![Reverse Engineering Setup](docs/images/vertical-stack-card.png)
+
+### ifram-card tesvor live mapr
+
+![Reverse Engineering Setup](docs/images/iframe-card.png)
+
+---
 ## Sicherheit
 
 Keine Secrets ins Repository committen. `x500.yaml` verwendet `!secret`; echte WLAN-, MQTT-, OTA- und API-Schlüssel gehören nur in `secrets.yaml`.

@@ -1,0 +1,541 @@
+esphome:
+  name: x500
+  friendly_name: RobiRoboter
+
+esp8266:
+  board: esp12e
+
+logger:
+  baud_rate: 0
+  level: DEBUG
+
+mqtt:
+  id: mqtt_client
+  broker: !secret mqtt_broker
+  port: 1883
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  topic_prefix: tesvor/x500
+  discovery: false
+
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+globals:
+  - id: batdataglob
+    type: short
+    restore_value: true
+
+  - id: map_reset_requested
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: clean_start_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  - id: clean_elapsed_s
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  - id: was_cleaning
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+uart:
+  id: uart_bus
+  tx_pin: 1
+  rx_pin: 3
+  baud_rate: 115200
+  debug:
+    direction: BOTH
+    dummy_receiver: true
+    after:
+      timeout: 100ms
+    sequence:
+      - lambda: |-
+          UARTDebug::log_hex(direction, bytes, ' ');
+
+          // ------------------------------------------------------------
+          // Tesvor X500 UART parser
+          // - Status frames: AA 1C 06 ...
+          // - Map frames:    AA LL 03 01 40 00 00 NN [points...] CS
+          // ------------------------------------------------------------
+
+          static std::vector<std::string> map_points;
+          static uint32_t total_points = 0;
+          static uint16_t last_seq = 0xFFFF;
+          static uint32_t last_map_publish = 0;
+
+          auto publish_map = [&]() {
+            // Home Assistant states should stay short.
+            // Only the last 16 points are published as HA state.
+            const size_t max_points_in_state = 16;
+            size_t start = 0;
+            if (map_points.size() > max_points_in_state) {
+              start = map_points.size() - max_points_in_state;
+            }
+
+            char header[40];
+            snprintf(header, sizeof(header), "{\"n\":%lu,\"p\":[", (unsigned long) total_points);
+
+            std::string out = header;
+
+            for (size_t j = start; j < map_points.size(); j++) {
+              if (j > start) out += ",";
+              out += map_points[j];
+            }
+
+            out += "]}";
+            id(map_path_json).publish_state(out);
+          };
+
+          if (id(map_reset_requested)) {
+            map_points.clear();
+            total_points = 0;
+            last_seq = 0xFFFF;
+            id(map_reset_requested) = false;
+            publish_map();
+          }
+
+          size_t i = 0;
+
+          while (i + 3 <= bytes.size()) {
+            if (bytes[i] != 0xAA) {
+              i++;
+              continue;
+            }
+
+            const uint8_t len = bytes[i + 1];
+            const size_t frame_size = (size_t) len + 3;  // AA + LEN + payload + checksum
+
+            if (i + frame_size > bytes.size()) {
+              // Incomplete frame; wait for next UART chunk.
+              break;
+            }
+
+            // ----------------------------------------------------------
+            // Status frame: AA 1C 06 ... = 31 bytes total
+            // ----------------------------------------------------------
+            if (len == 0x1C && frame_size == 31) {
+              // Verified checksum: additive sum over bytes[2..29].
+              uint8_t _cks = 0;
+              for (uint8_t k = 2; k < 30; k++) _cks += bytes[i + k];
+              if (_cks != bytes[i + 30]) {
+                i += frame_size;
+                continue;
+              }
+
+              const uint8_t state = bytes[i + 6];
+              id(status_byte_7_raw).publish_state(bytes[i + 7]);
+
+              bool _now_cleaning = (
+                state == 0x00 ||
+                state == 0x01 ||
+                state == 0x02 ||
+                state == 0x0B
+              );
+
+              if (_now_cleaning && !id(was_cleaning)) {
+                id(clean_start_ms) = millis();
+              }
+
+              if (_now_cleaning) {
+                id(clean_elapsed_s) = (millis() - id(clean_start_ms)) / 1000;
+              }
+
+              id(was_cleaning) = _now_cleaning;
+
+              switch (state) {
+                case 0x09:
+                  id(rawstate).publish_state("error");
+                  id(vacstate).publish_state("error");
+                  break;
+
+                case 0x08:
+                  id(rawstate).publish_state("docked");
+                  id(vacstate).publish_state("docked");
+                  break;
+
+                case 0x06:
+                  id(rawstate).publish_state("charging");
+                  id(vacstate).publish_state("docked");
+                  break;
+
+                case 0x05:
+                  id(rawstate).publish_state("hibernated");
+                  id(vacstate).publish_state("idle");
+                  break;
+
+                case 0x04:
+                  id(rawstate).publish_state("idle");
+                  id(vacstate).publish_state("idle");
+                  break;
+
+                case 0x03:
+                  id(rawstate).publish_state("returning");
+                  id(vacstate).publish_state("returning");
+                  break;
+
+                case 0x02:
+                  id(rawstate).publish_state("cleaning");
+                  id(vacstate).publish_state("cleaning");
+                  break;
+
+                case 0x01:
+                  id(rawstate).publish_state("spot cleaning");
+                  id(vacstate).publish_state("cleaning");
+                  break;
+
+                case 0x00:
+                  id(rawstate).publish_state("edge cleaning");
+                  id(vacstate).publish_state("cleaning");
+                  break;
+
+                case 0x0A:
+                  id(rawstate).publish_state("setting");
+                  id(vacstate).publish_state("idle");
+                  break;
+
+                case 0x0B:
+                  id(rawstate).publish_state("zmode cleaning");
+                  id(vacstate).publish_state("cleaning");
+                  break;
+              }
+
+              const char* mqtt_state = "unknown";
+
+              switch (state) {
+                case 0x09: mqtt_state = "error"; break;
+                case 0x08: mqtt_state = "docked"; break;
+                case 0x06: mqtt_state = "charging"; break;
+                case 0x05: mqtt_state = "hibernated"; break;
+                case 0x04: mqtt_state = "idle"; break;
+                case 0x03: mqtt_state = "returning"; break;
+                case 0x02: mqtt_state = "cleaning"; break;
+                case 0x01: mqtt_state = "spot_cleaning"; break;
+                case 0x00: mqtt_state = "edge_cleaning"; break;
+                case 0x0A: mqtt_state = "setting"; break;
+                case 0x0B: mqtt_state = "zmode_cleaning"; break;
+              }
+
+              id(mqtt_client).publish("tesvor/x500/state", mqtt_state);
+
+              if (
+                (state == 0x06) ||
+                (state == 0x05) ||
+                (state == 0x04) ||
+                (state == 0x02) ||
+                (state == 0x01) ||
+                (state == 0x00) ||
+                (state == 0x0B)
+              ) {
+                id(batdataglob) = bytes[i + 29];
+              }
+
+              if (state != 0x09) {
+                id(errorstate).publish_state("no error");
+              } else {
+                const uint8_t err = bytes[i + 28];
+
+                switch (err) {
+                  case 0x00:
+                    id(errorstate).publish_state("no error");
+                    break;
+                  case 0x02:
+                    id(errorstate).publish_state("rolling brush blocked");
+                    break;
+                  case 0x04:
+                    id(errorstate).publish_state("wheels blocked");
+                    break;
+                  case 0x07:
+                    id(errorstate).publish_state("side brush blocked");
+                    break;
+                  case 0x09:
+                    id(errorstate).publish_state("front guard jammed");
+                    break;
+                  case 0x14:
+                    id(errorstate).publish_state("no water box");
+                    break;
+                  case 0x15:
+                    id(errorstate).publish_state("no water mop");
+                    break;
+                  case 0x16:
+                    id(errorstate).publish_state("water box empty");
+                    break;
+                  case 0x17:
+                    id(errorstate).publish_state("water pump error");
+                    break;
+                  case 0x18:
+                    id(errorstate).publish_state("vibration pump error");
+                    break;
+                  default: {
+                    char errbuf[24];
+                    snprintf(errbuf, sizeof(errbuf), "error 0x%02X", err);
+                    id(errorstate).publish_state(errbuf);
+                    break;
+                  }
+                }
+              }
+            }
+
+            // ----------------------------------------------------------
+            // Map frame:
+            // AA LL 03 01 40 00 00 NN
+            // followed by NN points of 8 bytes:
+            // seq_hi seq_lo x_hi x_lo y_hi y_lo type reserved
+            // ----------------------------------------------------------
+            if (
+              len >= 6 &&
+              bytes[i + 2] == 0x03 &&
+              bytes[i + 3] == 0x01 &&
+              bytes[i + 4] == 0x40
+            ) {
+              const uint8_t point_count = bytes[i + 7];
+
+              if ((6 + ((size_t) point_count * 8)) <= len) {
+                std::string batch = "{\"p\":[";
+                bool batch_has_points = false;
+
+                for (uint8_t p = 0; p < point_count; p++) {
+                  const size_t o = i + 8 + ((size_t) p * 8);
+
+                  const uint16_t seq = ((uint16_t) bytes[o] << 8) | bytes[o + 1];
+                  const int16_t x = (int16_t) (((uint16_t) bytes[o + 2] << 8) | bytes[o + 3]);
+                  const int16_t y = (int16_t) (((uint16_t) bytes[o + 4] << 8) | bytes[o + 5]);
+                  const uint8_t kind = bytes[o + 6];
+
+                  // Avoid immediate duplicates.
+                  if (seq == last_seq) {
+                    continue;
+                  }
+
+                  last_seq = seq;
+                  total_points++;
+
+                  char pointbuf[32];
+                  snprintf(pointbuf, sizeof(pointbuf), "[%d,%d,%u]", x, y, kind);
+
+                  char mqtt_pointbuf[40];
+                  snprintf(mqtt_pointbuf, sizeof(mqtt_pointbuf), "[%u,%d,%d,%u]", seq, x, y, kind);
+
+                  if (batch_has_points) batch += ",";
+                  batch += mqtt_pointbuf;
+                  batch_has_points = true;
+
+                  map_points.push_back(pointbuf);
+
+                  // Limit RAM usage.
+                  if (map_points.size() > 120) {
+                    map_points.erase(map_points.begin());
+                  }
+                }
+
+                if (batch_has_points) {
+                  batch += "]}";
+                  id(mqtt_client).publish("tesvor/x500/map/points", batch);
+                }
+
+                // Do not flood Home Assistant with every UART frame.
+                const uint32_t now = millis();
+                if (now - last_map_publish > 2000) {
+                  last_map_publish = now;
+                  publish_map();
+                }
+              }
+            }
+
+            i += frame_size;
+          }
+
+text_sensor:
+  - platform: template
+    id: rawstate
+    name: state
+
+  - platform: template
+    id: vacstate
+    name: vacuum state
+
+  - platform: template
+    id: errorstate
+    name: error state
+
+  - platform: template
+    id: map_path_json
+    name: map path json
+
+sensor:
+  - platform: template
+    name: battery
+    id: batdata
+    accuracy_decimals: 0
+    lambda: return id(batdataglob);
+
+  - platform: template
+    name: "Reinigungsdauer"
+    id: clean_time_min
+    unit_of_measurement: "min"
+    icon: "mdi:timer-outline"
+    accuracy_decimals: 0
+    update_interval: 15s
+    lambda: 'return id(clean_elapsed_s) / 60.0;'
+
+  - platform: template
+    name: "Status Byte 7 Rohwert"
+    id: status_byte_7_raw
+    icon: "mdi:database-search-outline"
+    accuracy_decimals: 0
+    update_interval: never
+
+select:
+  - platform: template
+    name: "Wischintensität"
+    optimistic: true
+    options:
+      - "Low"
+      - "Default"
+      - "High"
+      - "Off"
+    set_action:
+      - if:
+          condition:
+            lambda: 'return x == "Low";'
+          then:
+            - uart.write: [0xAA, 0x03, 0x02, 0x24, 0x00, 0x26]
+      - if:
+          condition:
+            lambda: 'return x == "Default";'
+          then:
+            - uart.write: [0xAA, 0x03, 0x02, 0x24, 0x01, 0x27]
+      - if:
+          condition:
+            lambda: 'return x == "High";'
+          then:
+            - uart.write: [0xAA, 0x03, 0x02, 0x24, 0x02, 0x28]
+      - if:
+          condition:
+            lambda: 'return x == "Off";'
+          then:
+            - uart.write: [0xAA, 0x03, 0x02, 0x24, 0x03, 0x29]
+
+  - platform: template
+    name: "Saugstärke Test experimentell"
+    optimistic: true
+    options:
+      - "Normal"
+      - "Strong"
+      - "Pause"
+      - "Quiet"
+    set_action:
+      - if:
+          condition:
+            lambda: 'return x == "Normal";'
+          then:
+            - uart.write: [0xAA, 0x03, 0x02, 0x25, 0x01, 0x28]
+      - if:
+          condition:
+            lambda: 'return x == "Strong";'
+          then:
+            - uart.write: [0xAA, 0x03, 0x02, 0x25, 0x02, 0x29]
+      - if:
+          condition:
+            lambda: 'return x == "Pause";'
+          then:
+            - uart.write: [0xAA, 0x03, 0x02, 0x25, 0x03, 0x2A]
+      - if:
+          condition:
+            lambda: 'return x == "Quiet";'
+          then:
+            - uart.write: [0xAA, 0x03, 0x02, 0x25, 0x04, 0x2B]
+
+button:
+  - platform: template
+    name: "Smart Cleaning"
+    on_press:
+      then:
+        - uart.write: [0xAA, 0x03, 0x02, 0x22, 0x02, 0x26]
+
+  - platform: template
+    name: "Spot Cleaning"
+    on_press:
+      then:
+        - uart.write: [0xAA, 0x03, 0x02, 0x22, 0x01, 0x25]
+
+  - platform: template
+    name: "Edge Cleaning"
+    on_press:
+      then:
+        - uart.write: [0xAA, 0x03, 0x02, 0x22, 0x00, 0x24]
+
+  - platform: template
+    name: "Stop"
+    on_press:
+      then:
+        - uart.write: [0xAA, 0x03, 0x02, 0x26, 0x00, 0x28]
+
+  - platform: template
+    name: "Go Charge"
+    on_press:
+      then:
+        - uart.write: [0xAA, 0x03, 0x02, 0x22, 0x03, 0x27]
+
+  - platform: template
+    name: "Move Front"
+    on_press:
+      then:
+        - uart.write: [0xAA, 0x03, 0x02, 0x21, 0x00, 0x23, 0xAA, 0x03, 0x02, 0x21, 0x04, 0x27]
+
+  - platform: template
+    name: "Move Back"
+    on_press:
+      then:
+        - uart.write: [0xAA, 0x03, 0x02, 0x21, 0x03, 0x26, 0xAA, 0x03, 0x02, 0x21, 0x04, 0x27]
+
+  - platform: template
+    name: "Move Left"
+    on_press:
+      then:
+        - uart.write: [0xAA, 0x03, 0x02, 0x21, 0x01, 0x24, 0xAA, 0x03, 0x02, 0x21, 0x04, 0x27]
+
+  - platform: template
+    name: "Move Right"
+    on_press:
+      then:
+        - uart.write: [0xAA, 0x03, 0x02, 0x21, 0x02, 0x25, 0xAA, 0x03, 0x02, 0x21, 0x04, 0x27]
+
+  - platform: template
+    name: "Zickzack / Wischen"
+    on_press:
+      then:
+        - uart.write: [0xAA, 0x03, 0x02, 0x22, 0x04, 0x28]
+
+  - platform: template
+    name: "Mop Cleaning Test experimentell"
+    on_press:
+      then:
+        - uart.write: [0xAA, 0x03, 0x02, 0x22, 0x05, 0x29]
+
+  - platform: template
+    name: "Map Reset"
+    on_press:
+      then:
+        - lambda: |-
+            id(map_reset_requested) = true;
+            id(clean_start_ms) = 0;
+            id(clean_elapsed_s) = 0;
+            id(was_cleaning) = false;
+            id(map_path_json).publish_state("{\"n\":0,\"p\":[]}");

@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Tesvor X500 Karte</title>
+  <style>
+    :root {
+      --bg: #12161d;
+      --panel: #1d2430;
+      --text: #f4f6f8;
+      --muted: #aab4c2;
+      --accent: #2ead6b;
+      --grid: rgba(255,255,255,.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      overflow: hidden;
+    }
+
+    header {
+      height: 54px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding: 8px 12px;
+      background: var(--panel);
+      border-bottom: 1px solid rgba(255,255,255,.08);
+    }
+
+    h1 {
+      font-size: 17px;
+      margin: 0;
+      white-space: nowrap;
+    }
+
+    select, button {
+      background: #2a3341;
+      color: var(--text);
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 10px;
+      padding: 8px 10px;
+      font: inherit;
+      min-width: 0;
+    }
+
+    #archiveSelect {
+      flex: 1;
+      max-width: 520px;
+    }
+
+    main {
+      height: calc(100vh - 54px);
+      position: relative;
+    }
+
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: radial-gradient(circle at center, #1a2029 0%, #11151b 100%);
+    }
+
+    #info {
+      position: absolute;
+      left: 12px;
+      bottom: 12px;
+      right: 12px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      pointer-events: none;
+      color: var(--muted);
+      font-size: 13px;
+      text-shadow: 0 1px 2px #000;
+    }
+
+    #badge {
+      color: #fff;
+      background: rgba(46,173,107,.22);
+      border: 1px solid rgba(46,173,107,.5);
+      border-radius: 999px;
+      padding: 4px 10px;
+    }
+
+    @media (max-width: 620px) {
+      header {
+        height: auto;
+        flex-wrap: wrap;
+      }
+
+      h1 {
+        width: 100%;
+      }
+
+      main {
+        height: calc(100vh - 98px);
+      }
+
+      #archiveSelect {
+        flex: 1 1 calc(100% - 90px);
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Tesvor X500 Karte</h1>
+    <select id="archiveSelect" title="Archiv auswählen">
+      <option value="current.json">Aktuelle Karte</option>
+    </select>
+    <button id="reloadBtn" type="button">Neu laden</button>
+  </header>
+
+  <main>
+    <canvas id="map"></canvas>
+    <div id="info">
+      <span id="badge">warte auf Daten…</span>
+      <span id="lastPoint"></span>
+    </div>
+  </main>
+
+  <script>
+    const canvas = document.getElementById("map");
+    const ctx = canvas.getContext("2d");
+    const archiveSelect = document.getElementById("archiveSelect");
+    const reloadBtn = document.getElementById("reloadBtn");
+    const badge = document.getElementById("badge");
+    const lastPoint = document.getElementById("lastPoint");
+
+    let currentUrl = "current.json";
+    let timer = null;
+
+    function normalizePoint(p) {
+      if (Array.isArray(p)) {
+        return {
+          seq: Number(p[0]),
+          x: Number(p[1]),
+          y: Number(p[2]),
+          type: Number(p[3])
+        };
+      }
+
+      return {
+        seq: Number(p.seq),
+        x: Number(p.x),
+        y: Number(p.y),
+        type: Number(p.type)
+      };
+    }
+
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+      canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function drawGrid(w, h) {
+      ctx.strokeStyle = "rgba(255,255,255,.07)";
+      ctx.lineWidth = 1;
+      for (let x = 0; x < w; x += 32) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+      }
+      for (let y = 0; y < h; y += 32) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+      }
+    }
+
+    function drawMap(data) {
+      resizeCanvas();
+
+      const rect = canvas.getBoundingClientRect();
+      const w = rect.width;
+      const h = rect.height;
+
+      ctx.clearRect(0, 0, w, h);
+      drawGrid(w, h);
+
+      const points = (data.points || [])
+        .map(normalizePoint)
+        .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+      badge.textContent = `${points.length} Punkte`;
+      if (!points.length) {
+        lastPoint.textContent = "keine Punkte";
+        return;
+      }
+
+      const xs = points.map(p => p.x);
+      const ys = points.map(p => p.y);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+
+      const pad = 28;
+      const spanX = Math.max(1, maxX - minX);
+      const spanY = Math.max(1, maxY - minY);
+      const scale = Math.min((w - pad * 2) / spanX, (h - pad * 2) / spanY);
+
+      const mapX = x => pad + (x - minX) * scale;
+      const mapY = y => h - pad - (y - minY) * scale;
+
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(46,173,107,.75)";
+      ctx.beginPath();
+      points.forEach((p, idx) => {
+        const x = mapX(p.x);
+        const y = mapY(p.y);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      for (const p of points) {
+        const x = mapX(p.x);
+        const y = mapY(p.y);
+        ctx.beginPath();
+        ctx.fillStyle = p.type === 3 ? "#ffb74d" : (p.type === 2 ? "#4aabdb" : "#2ead6b");
+        ctx.arc(x, y, p.type === 3 ? 4 : 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      const last = points[points.length - 1];
+      const lx = mapX(last.x);
+      const ly = mapY(last.y);
+
+      ctx.beginPath();
+      ctx.fillStyle = "#ff2d8d";
+      ctx.arc(lx, ly, 7, 0, Math.PI * 2);
+      ctx.fill();
+
+      lastPoint.textContent = `Letzter Punkt: x=${last.x}, y=${last.y}, type=${last.type}`;
+    }
+
+    async function loadArchiveIndex() {
+      try {
+        const res = await fetch("archive_index.json?ts=" + Date.now(), { cache: "no-store" });
+        if (!res.ok) return;
+        const index = await res.json();
+
+        const currentValue = archiveSelect.value || "current.json";
+        archiveSelect.innerHTML = '<option value="current.json">Aktuelle Karte</option>';
+
+        for (const f of index.files || []) {
+          const opt = document.createElement("option");
+          opt.value = f.path;
+          opt.textContent = f.name;
+          archiveSelect.appendChild(opt);
+        }
+
+        archiveSelect.value = [...archiveSelect.options].some(o => o.value === currentValue)
+          ? currentValue
+          : "current.json";
+      } catch (e) {
+        console.warn("archive_index.json nicht lesbar", e);
+      }
+    }
+
+    async function loadMap() {
+      try {
+        const url = currentUrl + "?ts=" + Date.now();
+        const res = await fetch(url, { cache: "no-store" });
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const data = await res.json();
+        drawMap(data);
+      } catch (e) {
+        badge.textContent = "Fehler beim Laden";
+        lastPoint.textContent = String(e.message || e);
+      }
+    }
+
+    async function reloadAll() {
+      await loadArchiveIndex();
+      await loadMap();
+    }
+
+    archiveSelect.addEventListener("change", () => {
+      currentUrl = archiveSelect.value;
+      clearInterval(timer);
+      timer = null;
+
+      if (currentUrl === "current.json") {
+        timer = setInterval(loadMap, 3000);
+      }
+
+      loadMap();
+    });
+
+    reloadBtn.addEventListener("click", reloadAll);
+    window.addEventListener("resize", loadMap);
+
+    reloadAll();
+    timer = setInterval(loadMap, 3000);
+  </script>
+</body>
+</html>

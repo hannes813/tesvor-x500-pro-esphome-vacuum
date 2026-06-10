@@ -18,16 +18,20 @@ sowie offene Fragen. Ziel: dem nächsten Bastler einen Startpunkt geben und PRs 
 
 **State-Bytes (byte6):**
 `00` Edge · `01` Spot · `02` Smart-Clean · `03` Returning · `04` Idle · `05` Hibernated ·
-`06` Charging · `08` Docked · `09` Error · `0A` Setting · `0B` Zmode.
+`06` Charging · `08` Docked · `09` Error · `0A` Unknown/setting-like · `0B` Zmode.
+
+Notes:
+- `0x0B` is confirmed by live testing: sending Zmode command `AA 03 02 22 04 28` causes state `0x0B` and continuous map/path frames.
+- `0x0A` was observed in setting/timer-like contexts but is not yet as strongly validated as a named mode.
 
 **Bestätigte Kommandos** (`AA 03 02 <cmd> <param> <cks>`):
 
 | Opcode | Params | Funktion |
 | ------ | ------ | -------- |
 | `0x21` | 00–04 | Richtung (04 = Stop/Keepalive) |
-| `0x22` | 00–05 | Modus: 00 Edge · 01 Spot · 02 Smart · 03 Laden · 04 Zmode · 05 Mop |
-| `0x24` | 00–03 | Wischintensität (Wasserdurchfluss) |
-| `0x25` | 01–04 | Saugstärke |
+| `0x22` | 00–05 | Mode: 00 Edge · 01 Spot · 02 Smart · 03 Charge · 04 Zmode · 05 Mop candidate |
+| `0x24` | 00–03 | Water flow / mop intensity: 00 Low ✅ · 01 Default ❓ · 02 High ✅ · 03 Off ❓ |
+| `0x25` | 01–04 | Fan/suction command: 01 Normal · 02 Strong · 03 Pause · 04 Quiet |
 | `0x26` | 00 | Stop |
 
 ---
@@ -85,11 +89,16 @@ diese Werte stecken also **nicht** im Status-Frame eines Trockenlaufs.
 
 ---
 
-## Lead 5 — Status-Frame Byte 8
+## Lead 5 — Status-Frame Byte 7 / Byte 8
 
-Einziges nicht-triviales variables Byte neben State/Battery: `byte8` =
-`0x00` während aktiver Reinigung, sonst `0x02`. Bedeutung unbestätigt (Aktivitäts-/Phasen-Flag?).
-Als Diagnose-Rohwert beobachtbar.
+Bytes 7 and 8 are not fully understood.
+
+Observed:
+- Smart cleaning status frames often look like `... state=0x02 byte7=0x00 byte8=0x00 ...`.
+- Idle/charging frames often show `byte8=0x02`.
+- Zmode/wet-mopping captures showed combinations like `state=0x0B byte7=0x02 byte8=0x02`.
+
+Meaning unconfirmed. Keep both bytes as diagnostic raw values when investigating water tank, fan mode, sub-mode or activity phase.
 
 ---
 

@@ -102,8 +102,8 @@ pip3 install -r requirements.txt
 Start:
 
 ```bash
-export TESVOR_MQTT_HOST=192.168.178.56
-export TESVOR_MQTT_USER=mqtt
+export TESVOR_MQTT_HOST=192.xxx.xxx.xx
+export TESVOR_MQTT_USER='DEIN_USER'
 export TESVOR_MQTT_PASSWORD='DEIN_PASSWORT'
 python3 tesvor_map_writer.py
 ```
@@ -132,7 +132,7 @@ python3 -m http.server 8095
 Dann:
 
 ```text
-http://192.168.178.56:8095/map.html
+http://192.xxx.xxx.xx:xxxx/map.html
 ```
 
 Für Home Assistant Mobile App ist besser, die Karte unter `/config/www/tesvor-map` bereitzustellen und im iframe relativ einzubinden:

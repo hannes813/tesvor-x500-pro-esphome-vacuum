@@ -148,13 +148,13 @@ aspect_ratio: 100%
 
 ### Reverse engineering environment
 
-![Reverse Engineering Setup](docs/images/re-tesvor-4.png)
+![Reverse Engineering Setup](docs/images/re-tesvor-4.jpg)
 
 ### vertical-stack-card tesvor
 
 ![Reverse Engineering Setup](docs/images/vertical-stack-card.png)
 
-### ifram-card tesvor live mapr
+### iframe-card tesvor live mapr
 
 ![Reverse Engineering Setup](docs/images/iframe-card.png)
 
